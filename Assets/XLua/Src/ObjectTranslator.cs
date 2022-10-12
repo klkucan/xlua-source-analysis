@@ -467,8 +467,15 @@ namespace XLua
             return genericDelegateCreator;
         }
 
+        /// <summary>
+        /// 生成各种代理对象的地方
+        /// </summary>
+        /// <param name="bridge"></param>
+        /// <param name="delegateType"></param>
+        /// <returns></returns>
         Delegate getDelegate(DelegateBridgeBase bridge, Type delegateType)
         {
+            // DelegatesGensBridge中实现，本质是得到一个new System.Action(__Gen_Delegate_Imp0);
             Delegate ret = bridge.GetDelegateByType(delegateType);
 
             if (ret != null)
@@ -518,30 +525,65 @@ namespace XLua
             throw new InvalidCastException("This type must add to CSharpCallLua: " + delegateType.GetFriendlyName());
         }
         Dictionary<int, WeakReference> delegate_bridges = new Dictionary<int, WeakReference>();
+        /// <summary>
+        /// 当lua call cs时，如果参数有function就会调用这个
+        /// e.g. System.Action _action = translator.GetDelegate<System.Action>(L, 1);
+        /// </summary>
+        /// <param name="L"></param>
+        /// <param name="delegateType"></param>
+        /// <param name="idx"></param>
+        /// <returns></returns>
         public object CreateDelegateBridge(RealStatePtr L, Type delegateType, int idx)
         {
+            /*
+             * 总结一下lua function是如何被c#调用的:
+             * 1、function放到LUA_REGISTRYINDEX表，然后获取ref
+             * 2、利用这个ref值创建一个DelegateBridge对象，本质是个LuaBase，ref保存在LuaBase的luaReference
+             * 3、根据C#这边的类型，调用GetDelegateByType函数创建一个对象，比如C#这边是Action代表function，
+             *    那么就创建一个Action对象。这个对象会被保存到DelegateBridge中
+             * 4、如果这个function只对应C#这边一个类型的对象，那么DelegateBridge中用firstKey记录type（Action），
+             *    用firstValue保存这个对象。如果这个function被C#这边不同的地方使用，也就是说C#这边不同的类型对象，
+             *    都代表这个function，那么在DelegateBridge中就用一个Dictionary bindTo 来保存这些不同的类型和实例的关系。
+             *    需要注意的是，这些实例对象本质都代表了某个__Gen_Delegate_ImpN函数
+             * 5、__Gen_Delegate_ImpN这一系列方法的本质是真正调用function的地方，它里面有luaReference。注意在调用Action时，
+             *    真实调用的是__Gen_Delegate_Imp0这个方法，而这里面实际用LuaReference从LUA_REGISTRYINDEX表取到function，
+             *    然后PCall那个函数。
+            */
+
+            // System.Action _action = translator.GetDelegate<System.Action>(L, 1)为例复制function到栈顶
             LuaAPI.lua_pushvalue(L, idx);
+            // // 这个function作为key从从LUA_REGISTRYINDEX取值，这个值是function的ref
             LuaAPI.lua_rawget(L, LuaIndexes.LUA_REGISTRYINDEX);
+            // 拿到了的处理，第一次是拿不到的，真正第一次的执行在下面
             if (!LuaAPI.lua_isnil(L, -1))
             {
+                // 鬼知道拿到的数字是啥，可能是-1001000  ×
+                // 这个数字是function在LUA_REGISTRYINDEX的ref  √
                 int referenced = LuaAPI.xlua_tointeger(L, -1);
+                // 栈顶弹出table
                 LuaAPI.lua_pop(L, 1);
-
+                // 因为是弱引用，所以要看看还在不，不在的话要重建了
                 if (delegate_bridges[referenced].IsAlive)
                 {
                     if (delegateType == null)
                     {
                         return delegate_bridges[referenced].Target;
                     }
+                    // 得到第一次创建的bridge
                     DelegateBridgeBase exist_bridge = delegate_bridges[referenced].Target as DelegateBridgeBase;
                     Delegate exist_delegate;
+                    // 以Action类型取对象，如果有就返回Action对象，
+                    // 记住这里的exist_bridge是一个LuaBase对象，很像是它里面的luaReference
                     if (exist_bridge.TryGetDelegate(delegateType, out exist_delegate))
                     {
                         return exist_delegate;
                     }
                     else
                     {
+                        // 如果和之前存的类型不一样，那就得创建新类型的对象了，比如之前是Action，现在可以是UnityAction
                         exist_delegate = getDelegate(exist_bridge, delegateType);
+                        // exist_bridge.AddDelegate(typeof(UnityAction), new UnityAction(__Gen_Delegate_Imp0));
+                        // 第二个的话会开始把数据放到bindTo了，细节看里面的注释
                         exist_bridge.AddDelegate(delegateType, exist_delegate);
                         return exist_delegate;
                     }
@@ -549,13 +591,21 @@ namespace XLua
             }
             else
             {
+                // 栈顶弹出null
                 LuaAPI.lua_pop(L, 1);
             }
+            // 第一次的处理：
 
+            // function复制到栈顶
             LuaAPI.lua_pushvalue(L, idx);
+            // 获得在L G表？？上function的引用，并且弹出function。
+            // 这个reference会作为后面生的bridge对象最核心的数据，因为bridge就是一个LuaBase，代表一个lua对象。
+            // 应该是靠的这个reference最后在lua那边取得function的。
             int reference = LuaAPI.luaL_ref(L);
+            // key就是func
             LuaAPI.lua_pushvalue(L, idx);
             LuaAPI.lua_pushnumber(L, reference);
+            // LUA_REGISTRYINDEX[func] = reference
             LuaAPI.lua_rawset(L, LuaIndexes.LUA_REGISTRYINDEX);
             DelegateBridgeBase bridge;
             try
@@ -568,6 +618,7 @@ namespace XLua
                 else
 #endif
                 {
+                    // 这个bridge本质是个LuaBase，这个refrerence是luaReference
                     bridge = new DelegateBridge(reference, luaEnv);
                 }
             }
@@ -587,8 +638,19 @@ namespace XLua
             }
             try
             {
+                // ret是按照类型new对象，比如Action对象
                 var ret = getDelegate(bridge, delegateType);
+                // 一个function在lua那边可能用来做为多个C#对象callback（这只是一种用法），但是C#这边却要
+                // 根据类型创建多个bridge，只不过存的luaReference都是一个
+                // 想象如下场景，一个C#类中有三个Action属性，参数都一样。lua里3个变量都给的是同一个function，
+                // 第一次赋值的时候，会走到这里，创建bridge对象，firstKey = Action， firstValue = new Action
+                // 第二的赋值的时候， LuaAPI.lua_rawget(L, LuaIndexes.LUA_REGISTRYINDEX)得到了referenced，这里变量命名
+                // 很巧妙啊，确实是引用过了。然后一路过去，会把第一次创建的Action对象返回。
+                // 那么问题来了，这个被返回的Action是如何和这个lua的function结合的。毕竟那个reference是存在bridges中的，和Action
+                // 没关系，这就要去看真正创建Action对象的地方了，也就是GetDelegateByType这个函数，它里面创建的Action都是带参数的，
+                // __Gen_Delegate_Imp0, 可以看到这个方法也是动态生成的。
                 bridge.AddDelegate(delegateType, ret);
+                // 注意了，这里的key是reference
                 delegate_bridges[reference] = new WeakReference(bridge);
                 return ret;
             }

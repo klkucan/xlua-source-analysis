@@ -874,10 +874,9 @@ namespace XLua
                     {
                         // 找到类型的话push true对应了init_xlua中的代码
                         LuaAPI.lua_pushboolean(L, true);
-                        //Utils.PrintStack(L, type, typeof(UnityEngine.GameObject));
                         // -1 true
                         // -2 "UnityEngine.GameObject"
-                        //Utils.PrintStack(L, type, typeof(UnityEngine.GameObject));
+                        Utils.PrintStack(L, type, typeof(UnityEngine.GameObject));
 
                     }
                     else

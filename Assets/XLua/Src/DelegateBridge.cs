@@ -58,12 +58,18 @@ namespace XLua
             {
                 throw new ArgumentException("An element with the same key already exists in the dictionary.");
             }
-
+            // 第一次是满足这个条件的
             if (firstKey == null && bindTo == null) // nothing 
             {
                 firstKey = key;
                 firstValue = value;
             }
+            // 此时说明什么，说明一个lua的function给了不同的类型
+            // bindTo里面可能是这样的：
+            // key             v
+            // Action       ACtion实例对象
+            // UnityAction  UnityAction实例对象
+            // 所有可能的类型都在DelegatesGensBridge.cs文件的GetDelegateByType中定义
             else if (firstKey != null && bindTo == null) // one key existed
             {
                 bindTo = new Dictionary<Type, Delegate>();
@@ -138,6 +144,7 @@ namespace XLua
 
         public void PCall(IntPtr L, int nArgs, int nResults, int errFunc)
         {
+            // 参数依次为L，参数个数，返回值个数，错误处理函数处于栈的位置
             if (LuaAPI.lua_pcall(L, nArgs, nResults, errFunc) != 0)
                 luaEnv.ThrowExceptionFromError(errFunc - 1);
         }
